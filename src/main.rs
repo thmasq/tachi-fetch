@@ -8,6 +8,8 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::mem::{self};
 use std::os::fd::AsRawFd;
+use std::process::Command;
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 static ARCH_LOGO: &str = r"                    -`                    
@@ -259,13 +261,6 @@ fn collect_system_info() -> SysInfo {
     // Extract GPU info if available through environment variables
     // This is much faster than parsing files for Wayland
 
-    let shell = get_env_var("SHELL", "/bin/sh");
-    let shell_name = if let Some(idx) = shell.rfind('/') {
-        &shell[idx + 1..]
-    } else {
-        shell
-    };
-
     let uptime = sys_info.uptime as u64;
 
     let de = get_env_var("XDG_CURRENT_DESKTOP", "Unknown");
@@ -312,7 +307,7 @@ fn collect_system_info() -> SysInfo {
         os_name: os_name,
         kernel: uts.release().to_string_lossy().into_owned(),
         uptime,
-        shell: shell_name.to_string(),
+        shell: String::new(),
         terminal: terminal.to_string(),
         de: de.to_string(),
         wm: wm.to_string(),
@@ -342,12 +337,120 @@ fn format_uptime(seconds: u64) -> String {
     format!("{}d {}h {}m", days, hours, mins)
 }
 
+fn start_shell_version_detection(shell_path: &str) -> JoinHandle<String> {
+    let shell_path = shell_path.to_string();
+
+    thread::spawn(move || {
+        let shell_name = if let Some(idx) = shell_path.rfind('/') {
+            &shell_path[idx + 1..]
+        } else {
+            &shell_path
+        };
+
+        match shell_name {
+            "zsh" => detect_zsh_version(),
+            "bash" => detect_bash_version(),
+            "fish" => detect_fish_version(),
+            _ => shell_name.to_string(),
+        }
+    })
+}
+
+fn join_shell_version_thread(handle: JoinHandle<String>, shell_path: &str) -> String {
+    match handle.join() {
+        Ok(shell_info) => shell_info,
+        Err(_) => {
+            let shell_name = if let Some(idx) = shell_path.rfind('/') {
+                &shell_path[idx + 1..]
+            } else {
+                shell_path
+            };
+            shell_name.to_string()
+        }
+    }
+}
+
+fn detect_zsh_version() -> String {
+    let output = Command::new("zsh").arg("--version").output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let first_line = output_str.lines().next().unwrap_or("");
+
+            if let Some(pos) = first_line.find("zsh ") {
+                let version_start = pos + 4;
+                if let Some(pos) = first_line[version_start..].find(' ') {
+                    return format!("zsh {}", &first_line[version_start..version_start + pos]);
+                }
+            }
+            "zsh".to_string()
+        }
+        _ => "zsh".to_string(),
+    }
+}
+
+fn detect_bash_version() -> String {
+    let output = Command::new("bash").arg("--version").output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let first_line = output_str.lines().next().unwrap_or("");
+
+            if let Some(pos) = first_line.find("version ") {
+                let version_start = pos + 8;
+                if let Some(pos) = first_line[version_start..].find(|c| c == '-' || c == '(') {
+                    let version = first_line[version_start..version_start + pos].trim();
+                    return format!("bash {}", version);
+                }
+                let remaining = first_line[version_start..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if !remaining.is_empty() {
+                    return format!("bash {}", remaining);
+                }
+            }
+            "bash".to_string()
+        }
+        _ => "bash".to_string(),
+    }
+}
+
+fn detect_fish_version() -> String {
+    let output = Command::new("fish").arg("--version").output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            let first_line = output_str.lines().next().unwrap_or("");
+
+            if let Some(pos) = first_line.find("version ") {
+                let version_start = pos + 8;
+                let version = first_line[version_start..].trim();
+                if !version.is_empty() {
+                    return format!("fish {}", version);
+                }
+            }
+            "fish".to_string()
+        }
+        _ => "fish".to_string(),
+    }
+}
+
 fn main() {
     let start_time = Instant::now();
 
+    let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let version_thread = start_shell_version_detection(&shell_path);
+
     Lazy::force(&ENV_CACHE);
 
-    let info = collect_system_info();
+    let mut info = collect_system_info();
+
+    let shell_with_version = join_shell_version_thread(version_thread, &shell_path);
+    info.shell = shell_with_version;
 
     let logo_lines: Vec<&str> = ARCH_LOGO.lines().collect();
     let logo_width = logo_lines.iter().map(|line| line.len()).max().unwrap_or(0);
