@@ -1,5 +1,5 @@
 use libc::{self, c_char};
-use memmap2::{Mmap, MmapOptions};
+use memmap2::Mmap;
 use nix::sys::utsname::uname;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHashMap;
@@ -7,9 +7,9 @@ use smallvec::{SmallVec, smallvec};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::mem::{self};
+use std::os::fd::AsRawFd;
 use std::time::Instant;
 
-const CPU_BUF_SIZE: usize = 128;
 static ARCH_LOGO: &str = r"                    -`                    
                    .o+`                   
                   `ooo/                   
@@ -76,30 +76,34 @@ unsafe fn fast_sysinfo() -> libc::sysinfo {
 }
 
 fn get_cpu_info() -> String {
-    let mut result = String::with_capacity(CPU_BUF_SIZE);
-
-    // Direct syscall to get CPU count using nix
     let cpu_online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize };
 
-    // Use mmap to read /proc/cpuinfo for model name
+    let mut model_name = String::new();
+
     if let Ok(file) = File::open("/proc/cpuinfo") {
-        unsafe {
-            if let Ok(mmap) = MmapOptions::new().map(&file) {
-                // Fast scan for model name
-                if let Some(model_line) = find_in_mmap(&mmap, b"model name") {
-                    if let Some(idx) = memchr::memchr(b':', model_line) {
-                        let model = &model_line[idx + 1..];
-                        // Skip leading whitespace
-                        let mut start = 0;
-                        while start < model.len() && model[start] == b' ' {
-                            start += 1;
-                        }
-                        if let Ok(s) = std::str::from_utf8(&model[start..]) {
-                            result.push_str(s.trim());
-                            result.push_str(" (");
-                            result.push_str(&cpu_online.to_string());
-                            result.push(')');
-                            return result;
+        const BUF_SIZE: usize = 512;
+
+        let mut buffer = [0u8; BUF_SIZE];
+
+        let fd = file.as_raw_fd();
+
+        let bytes_read =
+            unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, BUF_SIZE) };
+
+        if bytes_read > 0 {
+            let slice = &buffer[0..bytes_read as usize];
+
+            let model_tag = b"model name\t: ";
+
+            if let Some(pos) = memchr::memmem::find(slice, model_tag) {
+                let start = pos + model_tag.len();
+
+                if let Some(end) = memchr::memchr(b'\n', &slice[start..]) {
+                    if let Ok(model) = std::str::from_utf8(&slice[start..start + end]) {
+                        if let Some(core_idx) = model.find("-Core") {
+                            model_name = model[0..core_idx].trim().to_string();
+                        } else {
+                            model_name = model.trim().to_string();
                         }
                     }
                 }
@@ -107,7 +111,31 @@ fn get_cpu_info() -> String {
         }
     }
 
-    format!("Unknown CPU ({} cores)", cpu_online)
+    let mut max_freq_ghz = 0.0;
+
+    if let Ok(freq_str) =
+        std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+    {
+        if let Ok(freq_khz) = freq_str.trim().parse::<u64>() {
+            // Convert kHz to GHz
+
+            max_freq_ghz = freq_khz as f64 / 1_000_000.0;
+        }
+    }
+
+    // Format the result
+
+    if model_name.is_empty() {
+        format!("Unknown CPU ({} cores)", cpu_online)
+    } else {
+        let freq_str = if max_freq_ghz > 0.0 {
+            format!(" @ {:.3}GHz", max_freq_ghz)
+        } else {
+            String::new()
+        };
+
+        format!("{} ({}){}", model_name, cpu_online, freq_str)
+    }
 }
 
 #[inline(always)]
