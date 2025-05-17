@@ -50,6 +50,8 @@ static ENV_CACHE: Lazy<FxHashMap<&'static str, String>> = Lazy::new(|| {
     map
 });
 
+static DISTRO_NAME: Lazy<String> = Lazy::new(|| get_distribution_name());
+
 struct SysInfo {
     hostname: String,
     os_name: String,
@@ -67,7 +69,6 @@ struct SysInfo {
     memory_total: u64,
 }
 
-// Fast implementation of libc sysinfo
 #[inline(always)]
 unsafe fn fast_sysinfo() -> libc::sysinfo {
     let mut info: libc::sysinfo = unsafe { mem::zeroed() };
@@ -185,6 +186,61 @@ fn format_memory(bytes: u64) -> String {
     format!("{} MiB", bytes >> 20)
 }
 
+fn get_distribution_name() -> String {
+    if let Ok(file) = File::open("/etc/os-release") {
+        if let Ok(mmap) = unsafe { memmap2::MmapOptions::new().map(&file) } {
+            let data = mmap.as_ref();
+
+            let name_pattern = b"NAME=";
+            let id_pattern = b"ID=";
+
+            if let Some(pos) = memchr::memmem::find(data, name_pattern) {
+                let start = pos + name_pattern.len();
+                if let Some(end_offset) = memchr::memchr(b'\n', &data[start..]) {
+                    let end = start + end_offset;
+                    let name = &data[start..end];
+
+                    let name = if name.len() >= 2 && name[0] == b'"' && name[name.len() - 1] == b'"'
+                    {
+                        &name[1..name.len() - 1]
+                    } else {
+                        name
+                    };
+
+                    if let Ok(name_str) = std::str::from_utf8(name) {
+                        return name_str.trim().to_string();
+                    }
+                }
+            } else if let Some(pos) = memchr::memmem::find(data, id_pattern) {
+                let start = pos + id_pattern.len();
+                if let Some(end_offset) = memchr::memchr(b'\n', &data[start..]) {
+                    let end = start + end_offset;
+                    if let Ok(id) = std::str::from_utf8(&data[start..end]) {
+                        let id = id.trim().trim_matches('"');
+                        let mut id_chars = id.chars();
+                        return match id_chars.next() {
+                            Some(c) => {
+                                c.to_uppercase().collect::<String>() + id_chars.as_str() + " Linux"
+                            }
+                            None => "Linux".to_string(),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    if std::path::Path::new("/etc/arch-release").exists() {
+        return "Arch Linux".to_string();
+    } else if std::path::Path::new("/etc/debian_version").exists() {
+        return "Debian Linux".to_string();
+    } else if std::path::Path::new("/etc/redhat-release").exists() {
+        return "Red Hat Linux".to_string();
+    }
+
+    "Linux".to_string()
+}
+
 fn collect_system_info() -> SysInfo {
     let uts = uname().unwrap();
 
@@ -241,13 +297,19 @@ fn collect_system_info() -> SysInfo {
 
     let (mem_used, mem_total) = get_memory_info();
 
-    SysInfo {
-        hostname: String::from_utf8_lossy(&hostname).into_owned(),
-        os_name: format!(
+    let os_name = if uts.sysname().to_string_lossy() == "Linux" {
+        format!("{} {}", &*DISTRO_NAME, uts.machine().to_string_lossy())
+    } else {
+        format!(
             "{} {}",
             uts.sysname().to_string_lossy(),
             uts.machine().to_string_lossy()
-        ),
+        )
+    };
+
+    SysInfo {
+        hostname: String::from_utf8_lossy(&hostname).into_owned(),
+        os_name: os_name,
         kernel: uts.release().to_string_lossy().into_owned(),
         uptime,
         shell: shell_name.to_string(),
