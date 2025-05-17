@@ -12,6 +12,8 @@ use std::process::Command;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+mod theme;
+
 static ARCH_LOGO: &str = r"                    -`                    
                    .o+`                   
                   `ooo/                   
@@ -278,9 +280,6 @@ fn collect_system_info() -> SysInfo {
         _ => "Unknown",
     };
 
-    let theme = get_env_var("GTK_THEME", "Unknown");
-    let icons = get_env_var("ICON_THEME", "Unknown");
-
     let terminal = get_env_var("TERM", "Unknown");
 
     let resolution = match get_env_var("XDG_SESSION_TYPE", "") {
@@ -311,8 +310,8 @@ fn collect_system_info() -> SysInfo {
         terminal: terminal.to_string(),
         de: de.to_string(),
         wm: wm.to_string(),
-        theme: theme.to_string(),
-        icons: icons.to_string(),
+        theme: String::new(),
+        icons: String::new(),
         resolution: resolution.to_string(),
         cpu_info,
         memory_used: mem_used,
@@ -445,12 +444,17 @@ fn main() {
     let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let version_thread = start_shell_version_detection(&shell_path);
 
+    let theme_thread = theme::start_theme_detection();
+    let icon_thread = theme::start_icon_detection();
+
     Lazy::force(&ENV_CACHE);
 
     let mut info = collect_system_info();
 
     let shell_with_version = join_shell_version_thread(version_thread, &shell_path);
     info.shell = shell_with_version;
+    info.theme = theme::join_theme_detection_thread(theme_thread);
+    info.icons = theme::join_icon_detection_thread(icon_thread);
 
     let logo_lines: Vec<&str> = ARCH_LOGO.lines().collect();
     let logo_width = logo_lines.iter().map(|line| line.len()).max().unwrap_or(0);
