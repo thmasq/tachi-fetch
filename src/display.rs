@@ -1,17 +1,10 @@
-use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
+use crate::utils::file_exists;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 // EDID constants
 const EDID_HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
 const EDID_SIZE: usize = 128;
-
-/// Fast utility to check if file exists
-#[inline(always)]
-fn file_exists(path: &Path) -> bool {
-    Path::new(path).exists()
-}
 
 /// Cache display resolutions to avoid repeated parsing
 pub fn get_screen_resolution() -> String {
@@ -29,8 +22,8 @@ fn get_drm_resolution() -> Result<String, ()> {
         return Err(());
     }
 
-    let mut resolutions = FxHashMap::default();
-    let mut active_connectors = SmallVec::<[PathBuf; 4]>::new();
+    let mut resolutions = rustc_hash::FxHashMap::default();
+    let mut active_connectors = smallvec::SmallVec::<[std::path::PathBuf; 4]>::new();
 
     // First find all potential connectors
     if let Ok(entries) = fs::read_dir(drm_path) {
@@ -39,7 +32,7 @@ fn get_drm_resolution() -> Result<String, ()> {
             let file_name = path.file_name().unwrap_or_default().to_string_lossy();
 
             // Look for card outputs like card0-HDMI-A-1
-            if file_name.starts_with("card") && file_name.contains("-") {
+            if file_name.starts_with("card") && file_name.contains('-') {
                 let status_path = path.join("status");
                 let edid_path = path.join("edid");
 
@@ -94,13 +87,13 @@ fn parse_edid_resolution(edid: &[u8]) -> Option<String> {
     }
 
     // Horizontal resolution: low 8 bits in byte 56, high 4 bits in upper nibble of byte 58
-    let h_res = (((edid[58] as u16) & 0xF0) << 4) + (edid[56] as u16);
+    let h_res = ((u16::from(edid[58]) & 0xF0) << 4) + u16::from(edid[56]);
 
     // Vertical resolution: low 8 bits in byte 59, high 4 bits in upper nibble of byte 61
-    let v_res = (((edid[61] as u16) & 0xF0) << 4) + (edid[59] as u16);
+    let v_res = ((u16::from(edid[61]) & 0xF0) << 4) + u16::from(edid[59]);
 
     if h_res > 0 && v_res > 0 {
-        return Some(format!("{}x{}", h_res, v_res));
+        return Some(format!("{h_res}x{v_res}"));
     }
 
     None

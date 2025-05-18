@@ -1,20 +1,18 @@
 use libc::{self, c_char};
-use memmap2::Mmap;
 use nix::sys::utsname::uname;
-use once_cell::sync::Lazy;
-use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
-use std::ffi::{CStr, CString};
 use std::fs::File;
-use std::mem::{self};
 use std::os::fd::AsRawFd;
-use std::process::Command;
+use std::sync::LazyLock;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 mod display;
 mod proc;
 mod theme;
+mod utils;
+
+use utils::{ENV_CACHE, fast_sysinfo, format_memory, format_uptime, get_env_var};
 
 static ARCH_LOGO: &str = r"                    -`                    
                    .o+`                   
@@ -36,27 +34,7 @@ static ARCH_LOGO: &str = r"                    -`
   `++:.                           `-/+/   
  .`                                   `/  ";
 
-static ENV_CACHE: Lazy<FxHashMap<&'static str, String>> = Lazy::new(|| {
-    let mut map = FxHashMap::default();
-    for var in &[
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_TYPE",
-        "SHELL",
-        "TERM",
-        "WAYLAND_DISPLAY",
-        "DISPLAY",
-        "DESKTOP_SESSION",
-        "GTK_THEME",
-        "ICON_THEME",
-    ] {
-        if let Ok(val) = std::env::var(*var) {
-            map.insert(*var, val);
-        }
-    }
-    map
-});
-
-static DISTRO_NAME: Lazy<String> = Lazy::new(|| get_distribution_name());
+static DISTRO_NAME: std::sync::LazyLock<String> = std::sync::LazyLock::new(get_distribution_name);
 
 struct SysInfo {
     hostname: String,
@@ -75,14 +53,9 @@ struct SysInfo {
     memory_total: u64,
 }
 
-#[inline(always)]
-unsafe fn fast_sysinfo() -> libc::sysinfo {
-    let mut info: libc::sysinfo = unsafe { mem::zeroed() };
-    unsafe { libc::sysinfo(&mut info as *mut libc::sysinfo) };
-    info
-}
-
 fn get_cpu_info() -> String {
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
     let cpu_online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as usize };
 
     let mut model_name = String::new();
@@ -95,8 +68,8 @@ fn get_cpu_info() -> String {
         let fd = file.as_raw_fd();
 
         let bytes_read =
-            unsafe { libc::read(fd, buffer.as_mut_ptr() as *mut libc::c_void, BUF_SIZE) };
-
+            unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), BUF_SIZE) };
+        #[allow(clippy::cast_sign_loss)]
         if bytes_read > 0 {
             let slice = &buffer[0..bytes_read as usize];
 
@@ -123,9 +96,8 @@ fn get_cpu_info() -> String {
     if let Ok(freq_str) =
         std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
     {
+        #[allow(clippy::cast_precision_loss)]
         if let Ok(freq_khz) = freq_str.trim().parse::<u64>() {
-            // Convert kHz to GHz
-
             max_freq_ghz = freq_khz as f64 / 1_000_000.0;
         }
     }
@@ -133,28 +105,16 @@ fn get_cpu_info() -> String {
     // Format the result
 
     if model_name.is_empty() {
-        format!("Unknown CPU ({} cores)", cpu_online)
+        format!("Unknown CPU ({cpu_online} cores)")
     } else {
         let freq_str = if max_freq_ghz > 0.0 {
-            format!(" @ {:.3}GHz", max_freq_ghz)
+            format!(" @ {max_freq_ghz:.3}GHz")
         } else {
             String::new()
         };
 
-        format!("{} ({}){}", model_name, cpu_online, freq_str)
+        format!("{model_name} ({cpu_online}){freq_str}")
     }
-}
-
-#[inline(always)]
-unsafe fn find_in_mmap<'a>(mmap: &'a Mmap, pattern: &[u8]) -> Option<&'a [u8]> {
-    let data = mmap.as_ref();
-
-    if let Some(idx) = memchr::memmem::find(data, pattern) {
-        if let Some(end) = memchr::memchr(b'\n', &data[idx..]) {
-            return Some(&data[idx..idx + end]);
-        }
-    }
-    None
 }
 
 fn get_memory_info() -> (u64, u64) {
@@ -165,36 +125,10 @@ fn get_memory_info() -> (u64, u64) {
     // Fallback to sysinfo if our parser fails
     unsafe {
         let info = fast_sysinfo();
-        let total = info.totalram * info.mem_unit as u64;
-        let free = info.freeram * info.mem_unit as u64;
+        let total = info.totalram * u64::from(info.mem_unit);
+        let free = info.freeram * u64::from(info.mem_unit);
         (total - free, total)
     }
-}
-
-#[inline(always)]
-fn get_env_var<'a>(name: &'a str, default: &'a str) -> &'a str {
-    match ENV_CACHE.get(name) {
-        Some(val) => val,
-        None => default,
-    }
-}
-
-// Get environment variable from raw C environment
-// This is faster than Rust's std::env for repeated lookups
-#[allow(dead_code)]
-#[inline(always)]
-unsafe fn get_raw_env(name: &str) -> Option<String> {
-    let c_name = CString::new(name).ok()?;
-    let ptr = unsafe { libc::getenv(c_name.as_ptr()) };
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() })
-    }
-}
-
-fn format_memory(bytes: u64) -> String {
-    format!("{} MiB", bytes >> 20)
 }
 
 fn get_distribution_name() -> String {
@@ -229,12 +163,10 @@ fn get_distribution_name() -> String {
                     if let Ok(id) = std::str::from_utf8(&data[start..end]) {
                         let id = id.trim().trim_matches('"');
                         let mut id_chars = id.chars();
-                        return match id_chars.next() {
-                            Some(c) => {
-                                c.to_uppercase().collect::<String>() + id_chars.as_str() + " Linux"
-                            }
-                            None => "Linux".to_string(),
-                        };
+                        return id_chars.next().map_or_else(
+                            || "Linux".to_string(),
+                            |c| c.to_uppercase().collect::<String>() + id_chars.as_str() + " Linux",
+                        );
                     }
                 }
             }
@@ -259,7 +191,7 @@ fn collect_system_info() -> SysInfo {
 
     let mut hostname: SmallVec<[u8; 64]> = smallvec![0; 64];
     unsafe {
-        libc::gethostname(hostname.as_mut_ptr() as *mut c_char, hostname.len());
+        libc::gethostname(hostname.as_mut_ptr().cast::<c_char>(), hostname.len());
         let mut i = 0;
         while i < hostname.len() && hostname[i] != 0 {
             i += 1;
@@ -270,6 +202,7 @@ fn collect_system_info() -> SysInfo {
     // Extract GPU info if available through environment variables
     // This is much faster than parsing files for Wayland
 
+    #[allow(clippy::cast_sign_loss)]
     let uptime = sys_info.uptime as u64;
 
     let de = get_env_var("XDG_CURRENT_DESKTOP", "Unknown");
@@ -307,7 +240,7 @@ fn collect_system_info() -> SysInfo {
 
     SysInfo {
         hostname: String::from_utf8_lossy(&hostname).into_owned(),
-        os_name: os_name,
+        os_name,
         kernel: uts.release().to_string_lossy().into_owned(),
         uptime,
         shell: String::new(),
@@ -323,26 +256,10 @@ fn collect_system_info() -> SysInfo {
     }
 }
 
-fn format_uptime(seconds: u64) -> String {
-    let mins = seconds / 60;
-    if mins < 60 {
-        return format!("{} mins", mins);
-    }
-
-    let hours = mins / 60;
-    let mins = mins % 60;
-    if hours < 24 {
-        return format!("{}h {}m", hours, mins);
-    }
-
-    let days = hours / 24;
-    let hours = hours % 24;
-    format!("{}d {}h {}m", days, hours, mins)
-}
-
 fn start_shell_version_detection(shell_path: &str) -> JoinHandle<String> {
     let shell_path = shell_path.to_string();
 
+    #[allow(clippy::option_if_let_else)]
     thread::spawn(move || {
         let shell_name = if let Some(idx) = shell_path.rfind('/') {
             &shell_path[idx + 1..]
@@ -360,86 +277,63 @@ fn start_shell_version_detection(shell_path: &str) -> JoinHandle<String> {
 }
 
 fn join_shell_version_thread(handle: JoinHandle<String>, shell_path: &str) -> String {
-    match handle.join() {
-        Ok(shell_info) => shell_info,
-        Err(_) => {
-            let shell_name = if let Some(idx) = shell_path.rfind('/') {
-                &shell_path[idx + 1..]
-            } else {
-                shell_path
-            };
-            shell_name.to_string()
-        }
-    }
+    handle.join().unwrap_or_else(|_| {
+        let shell_name = shell_path
+            .rfind('/')
+            .map_or(shell_path, |idx| &shell_path[idx + 1..]);
+        shell_name.to_string()
+    })
 }
 
 fn detect_zsh_version() -> String {
-    let output = Command::new("zsh").arg("--version").output();
+    if let Some(output) = utils::run_command("zsh", &["--version"]) {
+        let first_line = output.lines().next().unwrap_or("");
 
-    match output {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let first_line = output_str.lines().next().unwrap_or("");
-
-            if let Some(pos) = first_line.find("zsh ") {
-                let version_start = pos + 4;
-                if let Some(pos) = first_line[version_start..].find(' ') {
-                    return format!("zsh {}", &first_line[version_start..version_start + pos]);
-                }
+        if let Some(pos) = first_line.find("zsh ") {
+            let version_start = pos + 4;
+            if let Some(pos) = first_line[version_start..].find(' ') {
+                return format!("zsh {}", &first_line[version_start..version_start + pos]);
             }
-            "zsh".to_string()
         }
-        _ => "zsh".to_string(),
     }
+    "zsh".to_string()
 }
 
 fn detect_bash_version() -> String {
-    let output = Command::new("bash").arg("--version").output();
+    if let Some(output) = utils::run_command("bash", &["--version"]) {
+        let first_line = output.lines().next().unwrap_or("");
 
-    match output {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let first_line = output_str.lines().next().unwrap_or("");
-
-            if let Some(pos) = first_line.find("version ") {
-                let version_start = pos + 8;
-                if let Some(pos) = first_line[version_start..].find(|c| c == '-' || c == '(') {
-                    let version = first_line[version_start..version_start + pos].trim();
-                    return format!("bash {}", version);
-                }
-                let remaining = first_line[version_start..]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                if !remaining.is_empty() {
-                    return format!("bash {}", remaining);
-                }
+        if let Some(pos) = first_line.find("version ") {
+            let version_start = pos + 8;
+            if let Some(pos) = first_line[version_start..].find(['-', '(']) {
+                let version = first_line[version_start..version_start + pos].trim();
+                return format!("bash {version}");
             }
-            "bash".to_string()
+            let remaining = first_line[version_start..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if !remaining.is_empty() {
+                return format!("bash {remaining}");
+            }
         }
-        _ => "bash".to_string(),
     }
+    "bash".to_string()
 }
 
 fn detect_fish_version() -> String {
-    let output = Command::new("fish").arg("--version").output();
+    if let Some(output) = utils::run_command("fish", &["--version"]) {
+        let first_line = output.lines().next().unwrap_or("");
 
-    match output {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let first_line = output_str.lines().next().unwrap_or("");
-
-            if let Some(pos) = first_line.find("version ") {
-                let version_start = pos + 8;
-                let version = first_line[version_start..].trim();
-                if !version.is_empty() {
-                    return format!("fish {}", version);
-                }
+        if let Some(pos) = first_line.find("version ") {
+            let version_start = pos + 8;
+            let version = first_line[version_start..].trim();
+            if !version.is_empty() {
+                return format!("fish {version}");
             }
-            "fish".to_string()
         }
-        _ => "fish".to_string(),
     }
+    "fish".to_string()
 }
 
 fn main() {
@@ -451,7 +345,7 @@ fn main() {
     let theme_thread = theme::start_theme_detection();
     let icon_thread = theme::start_icon_detection();
 
-    Lazy::force(&ENV_CACHE);
+    LazyLock::force(&ENV_CACHE);
 
     let mut info = collect_system_info();
 
@@ -514,5 +408,5 @@ fn main() {
     }
 
     let elapsed = start_time.elapsed();
-    eprintln!("Time elapsed: {:?}", elapsed);
+    eprintln!("Time elapsed: {elapsed:?}");
 }

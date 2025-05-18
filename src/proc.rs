@@ -2,12 +2,15 @@
 //! This provides zero-copy, zero-allocation parsers for /proc
 //! and can extract values with just a single pass through the file
 
+use crate::utils::{matches_at, parse_number_after};
 use std::fs::File;
 use std::io::Result;
 
+const REQUIRED: usize = 6;
+
 /// Fast specialized parser for memory info
 /// Returns used and total memory in bytes according to the formula:
-/// Used = Total - Free - Buffers - Cached - SReclaimable + Shmem
+/// Used = Total - Free - Buffers - Cached - `SReclaimable` + Shmem
 pub fn fast_parse_meminfo() -> Result<(u64, u64)> {
     let mut buffer = [0u8; 4096];
     let mut file = File::open("/proc/meminfo")?;
@@ -36,7 +39,6 @@ pub fn fast_parse_meminfo() -> Result<(u64, u64)> {
 
     let mut pos = 0;
     let mut found = 0;
-    const REQUIRED: usize = 6;
 
     while pos < bytes_read && found < REQUIRED {
         if total == 0 && matches_at(&buffer[pos..], total_pattern) {
@@ -103,11 +105,7 @@ pub fn fast_parse_meminfo() -> Result<(u64, u64)> {
     let total_bytes = total << 10;
     let adjusted_used = if total > 0 {
         let non_used = free + buffers + cached + sreclaimable;
-        let base_used = if total > non_used {
-            total - non_used
-        } else {
-            0
-        };
+        let base_used = total.saturating_sub(non_used);
         base_used + shmem
     } else {
         0
@@ -116,32 +114,4 @@ pub fn fast_parse_meminfo() -> Result<(u64, u64)> {
     let used_bytes = adjusted_used * 1024;
 
     Ok((used_bytes, total_bytes))
-}
-
-#[inline(always)]
-fn matches_at(data: &[u8], pattern: &[u8]) -> bool {
-    data.len() >= pattern.len() && &data[..pattern.len()] == pattern
-}
-
-#[inline(always)]
-fn parse_number_after(data: &[u8], offset: usize) -> Option<(u64, usize)> {
-    let mut pos = offset;
-
-    while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
-        pos += 1;
-    }
-
-    let start = pos;
-    let mut value: u64 = 0;
-
-    while pos < data.len() && data[pos] >= b'0' && data[pos] <= b'9' {
-        value = value * 10 + (data[pos] - b'0') as u64;
-        pos += 1;
-    }
-
-    if pos > start {
-        Some((value, pos))
-    } else {
-        None
-    }
 }

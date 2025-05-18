@@ -1,6 +1,4 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::utils::{expand_path, run_command, search_file_for_key};
 use std::thread::{self, JoinHandle};
 
 // Paths where theme and icon configurations might be found
@@ -21,102 +19,25 @@ static ICON_CONFIG_PATHS: &[&str] = &[
     "/usr/share/icons/default/index.theme",
 ];
 
-// Expand ~ to home directory
-fn expand_path(path: &str) -> PathBuf {
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(&path[2..]);
-        }
-    }
-    PathBuf::from(path)
-}
-
-// Efficient file line search - stop after finding what we need
-fn search_file_for_key(path: &Path, key: &str) -> Option<String> {
-    if !path.exists() {
-        return None;
-    }
-
-    if let Ok(content) = fs::read_to_string(path) {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with(key) && line.contains('=') {
-                let parts: Vec<&str> = line.splitn(2, '=').collect();
-                if parts.len() == 2 {
-                    let value = parts[1].trim().trim_matches('"');
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 // Try to detect using dconf/gsettings for GNOME-based environments
 fn query_gsettings(schema: &str, key: &str) -> Option<String> {
-    let output = Command::new("gsettings")
-        .args(&["get", schema, key])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Remove surrounding quotes if present
-        let value = value.trim_matches('\'').trim_matches('"');
-        if !value.is_empty() && value != "''" {
-            return Some(value.to_owned());
-        }
-    }
-    None
+    run_command("gsettings", &["get", schema, key])
 }
 
 // Try to detect using kf5-config for KDE
 fn query_kde_config(group: &str, key: &str) -> Option<String> {
     // First try kreadconfig5
-    let output = Command::new("kreadconfig5")
-        .args(&["--group", group, "--key", key])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
+    if let Some(value) = run_command("kreadconfig5", &["--group", group, "--key", key]) {
+        return Some(value);
     }
 
     // Fall back to kreadconfig
-    let output = Command::new("kreadconfig")
-        .args(&["--group", group, "--key", key])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
-    }
-
-    None
+    run_command("kreadconfig", &["--group", group, "--key", key])
 }
 
 // Query XSETTINGS for Xfce and other desktops
 fn query_xsettings(property: &str) -> Option<String> {
-    let output = Command::new("xfconf-query")
-        .args(&["-c", "xsettings", "-p", property])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
-    }
-    None
+    run_command("xfconf-query", &["-c", "xsettings", "-p", property])
 }
 
 // Internal theme detection function
@@ -162,14 +83,14 @@ fn detect_gtk_theme_internal() -> String {
         let path = expand_path(path_str);
 
         // For .ini style files
-        if path.extension().map_or(false, |ext| ext == "ini") {
+        if path.extension().is_some_and(|ext| ext == "ini") {
             if let Some(theme) = search_file_for_key(&path, "gtk-theme-name") {
                 return theme;
             }
         }
         // For gtk2 style files
-        else if path.file_name().map_or(false, |name| name == ".gtkrc-2.0") {
-            if let Ok(content) = fs::read_to_string(&path) {
+        else if path.file_name().is_some_and(|name| name == ".gtkrc-2.0") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
                 for line in content.lines() {
                     if line.contains("gtk-theme-name") {
                         let parts: Vec<&str> = line.split('=').collect();
@@ -232,14 +153,14 @@ fn detect_icon_theme_internal() -> String {
         let path = expand_path(path_str);
 
         // For .ini style files
-        if path.extension().map_or(false, |ext| ext == "ini") {
+        if path.extension().is_some_and(|ext| ext == "ini") {
             if let Some(icons) = search_file_for_key(&path, "gtk-icon-theme-name") {
                 return icons;
             }
         }
         // For index.theme files
-        else if path.file_name().map_or(false, |name| name == "index.theme") {
-            if let Some(content) = fs::read_to_string(&path).ok() {
+        else if path.file_name().is_some_and(|name| name == "index.theme") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
                 for line in content.lines() {
                     if line.starts_with("Inherits=") {
                         let icons = line.trim_start_matches("Inherits=").trim();
@@ -258,26 +179,21 @@ fn detect_icon_theme_internal() -> String {
 
 /// Start theme detection in separate thread
 pub fn start_theme_detection() -> JoinHandle<String> {
-    thread::spawn(move || detect_gtk_theme_internal())
+    thread::spawn(detect_gtk_theme_internal)
 }
 
 /// Start icon theme detection in separate thread
 pub fn start_icon_detection() -> JoinHandle<String> {
-    thread::spawn(move || detect_icon_theme_internal())
+    thread::spawn(detect_icon_theme_internal)
 }
 
 /// Join theme detection thread and handle errors
 pub fn join_theme_detection_thread(handle: JoinHandle<String>) -> String {
-    match handle.join() {
-        Ok(theme) => theme,
-        Err(_) => "Unknown".to_string(),
-    }
+    handle.join().unwrap_or_else(|_| "Unknown".to_string())
 }
 
 /// Join icon detection thread and handle errors
 pub fn join_icon_detection_thread(handle: JoinHandle<String>) -> String {
-    match handle.join() {
-        Ok(icons) => icons,
-        Err(_) => "Unknown".to_string(),
-    }
+    handle
+        .join().unwrap_or_else(|_| "Unknown".to_string())
 }
