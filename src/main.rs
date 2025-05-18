@@ -10,25 +10,25 @@ mod utils;
 
 use utils::{ENV_CACHE, format_memory, format_uptime};
 
-static ARCH_LOGO: &str = r"                    -`                    
-                   .o+`                   
-                  `ooo/                   
-                 `+oooo:                  
-                `+oooooo:                 
-                -+oooooo+:                
-              `/:-:++oooo+:               
-             `/++++/+++++++:              
-            `/++++++++++++++:             
-           `/+++ooooooooooooo/`           
-          ./ooosssso++osssssso+`          
-         .oossssso-````/ossssss+`         
-        -osssssso.      :ssssssso.        
-       :osssssss/        osssso+++.       
-      /ossssssss/        +ssssooo/-       
-    `/ossssso+/:-        -:/+osssso+-     
-   `+sso+:-`                 `.-/+oso:    
-  `++:.                           `-/+/   
- .`                                   `/  ";
+static ARCH_LOGO: &str = r"                   -`
+                  .o+`
+                 `ooo/
+                `+oooo:
+               `+oooooo:
+               -+oooooo+:
+             `/:-:++oooo+:
+            `/++++/+++++++:
+           `/++++++++++++++:
+          `/+++ooooooooooooo/`
+         ./ooosssso++osssssso+`
+        .oossssso-````/ossssss+`
+       -osssssso.      :ssssssso.
+      :osssssss/        osssso+++.
+     /ossssssss/        +ssssooo/-
+   `/ossssso+/:-        -:/+osssso+-
+  `+sso+:-`                 `.-/+oso:
+ `++:.                           `-/+/
+ .`                                 `/";
 
 fn main() {
     let start_time = Instant::now();
@@ -50,7 +50,7 @@ fn main() {
 
     let logo_lines: Vec<&str> = ARCH_LOGO.lines().collect();
     let logo_width = logo_lines.iter().map(|line| line.len()).max().unwrap_or(0);
-    let padding = 2; // Space between logo and info
+    let padding = 3; // Space between logo and info
 
     let mut info_lines = Vec::with_capacity(15);
     info_lines.push(format!(
