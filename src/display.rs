@@ -86,19 +86,18 @@ fn get_drm_resolution() -> Result<String, ()> {
 }
 
 /// Parse EDID data to extract resolution
-/// The resolution is stored in bytes 54-59 of the EDID data
+/// The resolution is stored in bytes 54-61 of the EDID data
 fn parse_edid_resolution(edid: &[u8]) -> Option<String> {
     // Validate EDID size and header
     if edid.len() < EDID_SIZE || &edid[0..8] != EDID_HEADER.as_ref() {
         return None;
     }
 
-    // Horizontal resolution: bytes 54-55
-    // First extract the most significant byte, then the least significant
+    // Horizontal resolution: low 8 bits in byte 56, high 4 bits in upper nibble of byte 58
     let h_res = (((edid[58] as u16) & 0xF0) << 4) + (edid[56] as u16);
 
-    // Vertical resolution: bytes 57-59
-    let v_res = (((edid[58] as u16) & 0x0F) << 8) + (edid[57] as u16);
+    // Vertical resolution: low 8 bits in byte 59, high 4 bits in upper nibble of byte 61
+    let v_res = (((edid[61] as u16) & 0xF0) << 4) + (edid[59] as u16);
 
     if h_res > 0 && v_res > 0 {
         return Some(format!("{}x{}", h_res, v_res));
