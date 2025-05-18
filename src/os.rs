@@ -107,10 +107,35 @@ pub fn get_cpu_info() -> String {
 
                 if let Some(end) = memchr::memchr(b'\n', &slice[start..]) {
                     if let Ok(model) = std::str::from_utf8(&slice[start..start + end]) {
-                        if let Some(core_idx) = model.find("-Core") {
-                            model_name = model[0..core_idx].trim().to_string();
+                        let trimmed_model = model.trim();
+
+                        // Look for "-Core" pattern
+                        if let Some(core_idx) =
+                            memchr::memmem::find(trimmed_model.as_bytes(), b"-Core")
+                        {
+                            // Find the last space before "-Core"
+                            let prefix_slice = &trimmed_model.as_bytes()[..core_idx];
+
+                            // Try to find the last space before the core count
+                            if let Some(last_space) = memchr::memrchr(b' ', prefix_slice) {
+                                // Check if everything between the last space and "-Core" is numeric
+                                let potential_count = &prefix_slice[last_space + 1..];
+                                let is_numeric =
+                                    potential_count.iter().all(|&b| b >= b'0' && b <= b'9');
+
+                                if is_numeric && !potential_count.is_empty() {
+                                    // This is a format like "AMD Ryzen 7 7800X3D 8-Core"
+                                    model_name = trimmed_model[..last_space].to_string();
+                                } else {
+                                    // This is a format like "AMD EPYC 7773X 64-Core"
+                                    model_name = trimmed_model[..core_idx].to_string();
+                                }
+                            } else {
+                                // No space found, use everything before "-Core"
+                                model_name = trimmed_model[..core_idx].to_string();
+                            }
                         } else {
-                            model_name = model.trim().to_string();
+                            model_name = trimmed_model.to_string();
                         }
                     }
                 }
