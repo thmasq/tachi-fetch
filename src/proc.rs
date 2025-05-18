@@ -2,206 +2,146 @@
 //! This provides zero-copy, zero-allocation parsers for /proc
 //! and can extract values with just a single pass through the file
 
-use memmap2::{Mmap, MmapOptions};
 use std::fs::File;
-use std::io::{Error, Result};
-
-/// Opens and memory maps a proc file for maximum performance
-#[inline(always)]
-pub fn mmap_proc_file(path: &str) -> Result<Mmap> {
-    let file = File::open(path)?;
-    unsafe { MmapOptions::new().map(&file) }
-}
-
-/// Fast specialized parser for CPU info
-/// Returns the model name and frequency with zero-copy and minimal allocation
-pub fn parse_cpu_info(mmap: &Mmap) -> (String, String) {
-    let data = unsafe { std::slice::from_raw_parts(mmap.as_ptr(), mmap.len()) };
-
-    // Use byte-based search for maximum performance
-    let model_tag = b"model name\t: ";
-    let mhz_tag = b"cpu MHz\t\t: ";
-
-    let mut model_name = String::new();
-    let mut cpu_mhz = String::new();
-
-    let mut pos = 0;
-    while pos < data.len() {
-        // Search for model name
-        if model_name.is_empty()
-            && pos + model_tag.len() < data.len()
-            && &data[pos..pos + model_tag.len()] == model_tag
-        {
-            pos += model_tag.len();
-            let start = pos;
-            // Find end of line
-            while pos < data.len() && data[pos] != b'\n' {
-                pos += 1;
-            }
-            // Extract the model name with minimal copying
-            if let Ok(s) = std::str::from_utf8(&data[start..pos]) {
-                model_name = s.to_string();
-            }
-            continue;
-        }
-
-        // Search for CPU frequency
-        if cpu_mhz.is_empty()
-            && pos + mhz_tag.len() < data.len()
-            && &data[pos..pos + mhz_tag.len()] == mhz_tag
-        {
-            pos += mhz_tag.len();
-            let start = pos;
-            // Find end of line
-            while pos < data.len() && data[pos] != b'\n' {
-                pos += 1;
-            }
-            // Extract the frequency with minimal copying
-            if let Ok(s) = std::str::from_utf8(&data[start..pos]) {
-                // Convert MHz to GHz with minimal parsing
-                if let Ok(mhz) = s.trim().parse::<f32>() {
-                    cpu_mhz = format!("{:.3} GHz", mhz / 1000.0);
-                } else {
-                    cpu_mhz = s.to_string();
-                }
-            }
-            continue;
-        }
-
-        // Skip to next line for faster processing
-        while pos < data.len() && data[pos] != b'\n' {
-            pos += 1;
-        }
-        pos += 1;
-    }
-
-    (model_name, cpu_mhz)
-}
+use std::io::Result;
 
 /// Fast specialized parser for memory info
-/// Returns used and total memory in bytes with minimal allocation
-pub fn parse_meminfo(mmap: &Mmap) -> (u64, u64) {
-    let data = unsafe { std::slice::from_raw_parts(mmap.as_ptr(), mmap.len()) };
+/// Returns used and total memory in bytes according to the formula:
+/// Used = Total - Free - Buffers - Cached - SReclaimable + Shmem
+pub fn fast_parse_meminfo() -> Result<(u64, u64)> {
+    let mut buffer = [0u8; 4096];
+    let mut file = File::open("/proc/meminfo")?;
 
-    // Tags to look for
-    let mem_total_tag = b"MemTotal:";
-    let mem_free_tag = b"MemFree:";
-    let mem_available_tag = b"MemAvailable:";
+    let bytes_read = std::io::Read::read(&mut file, &mut buffer)?;
+    if bytes_read == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Empty file",
+        ));
+    }
 
     let mut total: u64 = 0;
     let mut free: u64 = 0;
-    let mut available: u64 = 0;
+    let mut buffers: u64 = 0;
+    let mut cached: u64 = 0;
+    let mut sreclaimable: u64 = 0;
+    let mut shmem: u64 = 0;
+
+    let total_pattern = b"MemTotal:";
+    let free_pattern = b"MemFree:";
+    let buffers_pattern = b"Buffers:";
+    let cached_pattern = b"Cached:";
+    let sreclaimable_pattern = b"SReclaimable:";
+    let shmem_pattern = b"Shmem:";
 
     let mut pos = 0;
-    while pos < data.len() {
-        // Search for MemTotal
-        if total == 0
-            && pos + mem_total_tag.len() < data.len()
-            && &data[pos..pos + mem_total_tag.len()] == mem_total_tag
-        {
-            pos += mem_total_tag.len();
-            // Skip whitespace
-            while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
-                pos += 1;
+    let mut found = 0;
+    const REQUIRED: usize = 6;
+
+    while pos < bytes_read && found < REQUIRED {
+        if total == 0 && matches_at(&buffer[pos..], total_pattern) {
+            if let Some((value, new_pos)) = parse_number_after(&buffer[pos..], total_pattern.len())
+            {
+                total = value;
+                pos += new_pos;
+                found += 1;
+                continue;
             }
-            // Parse the number
-            let start = pos;
-            while pos < data.len() && data[pos] >= b'0' && data[pos] <= b'9' {
-                pos += 1;
+        } else if free == 0 && matches_at(&buffer[pos..], free_pattern) {
+            if let Some((value, new_pos)) = parse_number_after(&buffer[pos..], free_pattern.len()) {
+                free = value;
+                pos += new_pos;
+                found += 1;
+                continue;
             }
-            if let Ok(s) = std::str::from_utf8(&data[start..pos]) {
-                if let Ok(val) = s.parse::<u64>() {
-                    // Convert from kB to bytes
-                    total = val * 1024;
+        } else if buffers == 0 && matches_at(&buffer[pos..], buffers_pattern) {
+            if let Some((value, new_pos)) =
+                parse_number_after(&buffer[pos..], buffers_pattern.len())
+            {
+                buffers = value;
+                pos += new_pos;
+                found += 1;
+                continue;
+            }
+        } else if cached == 0 && matches_at(&buffer[pos..], cached_pattern) {
+            if pos == 0 || buffer[pos - 1] == b'\n' {
+                if let Some((value, new_pos)) =
+                    parse_number_after(&buffer[pos..], cached_pattern.len())
+                {
+                    cached = value;
+                    pos += new_pos;
+                    found += 1;
+                    continue;
                 }
             }
-            continue;
+        } else if sreclaimable == 0 && matches_at(&buffer[pos..], sreclaimable_pattern) {
+            if let Some((value, new_pos)) =
+                parse_number_after(&buffer[pos..], sreclaimable_pattern.len())
+            {
+                sreclaimable = value;
+                pos += new_pos;
+                found += 1;
+                continue;
+            }
+        } else if shmem == 0 && matches_at(&buffer[pos..], shmem_pattern) {
+            if let Some((value, new_pos)) = parse_number_after(&buffer[pos..], shmem_pattern.len())
+            {
+                shmem = value;
+                pos += new_pos;
+                found += 1;
+                continue;
+            }
         }
 
-        // Search for MemAvailable (preferred) or MemFree
-        if available == 0
-            && pos + mem_available_tag.len() < data.len()
-            && &data[pos..pos + mem_available_tag.len()] == mem_available_tag
-        {
-            pos += mem_available_tag.len();
-            // Skip whitespace
-            while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
-                pos += 1;
-            }
-            // Parse the number
-            let start = pos;
-            while pos < data.len() && data[pos] >= b'0' && data[pos] <= b'9' {
-                pos += 1;
-            }
-            if let Ok(s) = std::str::from_utf8(&data[start..pos]) {
-                if let Ok(val) = s.parse::<u64>() {
-                    // Convert from kB to bytes
-                    available = val * 1024;
-                }
-            }
-            continue;
-        }
-
-        // Search for MemFree (fallback if MemAvailable not found)
-        if free == 0
-            && pos + mem_free_tag.len() < data.len()
-            && &data[pos..pos + mem_free_tag.len()] == mem_free_tag
-        {
-            pos += mem_free_tag.len();
-            // Skip whitespace
-            while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
-                pos += 1;
-            }
-            // Parse the number
-            let start = pos;
-            while pos < data.len() && data[pos] >= b'0' && data[pos] <= b'9' {
-                pos += 1;
-            }
-            if let Ok(s) = std::str::from_utf8(&data[start..pos]) {
-                if let Ok(val) = s.parse::<u64>() {
-                    // Convert from kB to bytes
-                    free = val * 1024;
-                }
-            }
-            continue;
-        }
-
-        // Skip to next line for faster processing
-        while pos < data.len() && data[pos] != b'\n' {
-            pos += 1;
-        }
-        pos += 1;
-
-        // Early exit if we have all the data we need
-        if total > 0 && (available > 0 || free > 0) {
+        if let Some(nl_pos) = memchr::memchr(b'\n', &buffer[pos..bytes_read]) {
+            pos += nl_pos + 1;
+        } else {
             break;
         }
     }
 
-    let free_mem = if available > 0 { available } else { free };
-    let used_mem = if total > free_mem {
-        total - free_mem
+    let total_bytes = total << 10;
+    let adjusted_used = if total > 0 {
+        let non_used = free + buffers + cached + sreclaimable;
+        let base_used = if total > non_used {
+            total - non_used
+        } else {
+            0
+        };
+        base_used + shmem
     } else {
         0
     };
 
-    (used_mem, total)
+    let used_bytes = adjusted_used * 1024;
+
+    Ok((used_bytes, total_bytes))
 }
 
-/// Count the number of directories in a specific path
-/// For example, to count packages from pacman
-pub fn count_directories(path: &str) -> Result<usize> {
-    let mut count = 0;
+#[inline(always)]
+fn matches_at(data: &[u8], pattern: &[u8]) -> bool {
+    data.len() >= pattern.len() && &data[..pattern.len()] == pattern
+}
 
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            if let Ok(file_type) = entry.file_type() {
-                if file_type.is_dir() {
-                    count += 1;
-                }
-            }
-        }
+#[inline(always)]
+fn parse_number_after(data: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let mut pos = offset;
+
+    while pos < data.len() && (data[pos] == b' ' || data[pos] == b'\t') {
+        pos += 1;
     }
 
-    Ok(count)
+    let start = pos;
+    let mut value: u64 = 0;
+
+    while pos < data.len() && data[pos] >= b'0' && data[pos] <= b'9' {
+        value = value * 10 + (data[pos] - b'0') as u64;
+        pos += 1;
+    }
+
+    if pos > start {
+        Some((value, pos))
+    } else {
+        None
+    }
 }

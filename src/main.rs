@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 mod display;
+mod proc;
 mod theme;
 
 static ARCH_LOGO: &str = r"                    -`                    
@@ -157,6 +158,11 @@ unsafe fn find_in_mmap<'a>(mmap: &'a Mmap, pattern: &[u8]) -> Option<&'a [u8]> {
 }
 
 fn get_memory_info() -> (u64, u64) {
+    if let Ok((used, total)) = proc::fast_parse_meminfo() {
+        return (used, total);
+    }
+
+    // Fallback to sysinfo if our parser fails
     unsafe {
         let info = fast_sysinfo();
         let total = info.totalram * info.mem_unit as u64;
