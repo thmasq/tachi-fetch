@@ -12,6 +12,7 @@ use std::process::Command;
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
+mod display;
 mod theme;
 
 static ARCH_LOGO: &str = r"                    -`                    
@@ -282,10 +283,7 @@ fn collect_system_info() -> SysInfo {
 
     let terminal = get_env_var("TERM", "Unknown");
 
-    let resolution = match get_env_var("XDG_SESSION_TYPE", "") {
-        "wayland" => "Wayland Session",
-        _ => "Unknown",
-    };
+    let resolution = display::get_screen_resolution();
 
     let cpu_info = get_cpu_info();
 
@@ -312,7 +310,7 @@ fn collect_system_info() -> SysInfo {
         wm: wm.to_string(),
         theme: String::new(),
         icons: String::new(),
-        resolution: resolution.to_string(),
+        resolution,
         cpu_info,
         memory_used: mem_used,
         memory_total: mem_total,
