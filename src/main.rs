@@ -38,6 +38,7 @@ fn main() {
         .unwrap_or(&logos::LOGOS[102]);
 
     let logo_lines: Vec<&str> = logo.ascii_art.lines().collect();
+    let reset_sequence = "\x1b[0m";
     let padding = 3; // Space between logo and info
 
     let mut info_lines = Vec::with_capacity(15);
@@ -47,19 +48,24 @@ fn main() {
         info.hostname
     ));
     info_lines.push("-----------------".to_string());
-    info_lines.push(format!("OS: {}", info.os_name));
-    info_lines.push(format!("Kernel: {}", info.kernel));
-    info_lines.push(format!("Uptime: {}", format_uptime(info.uptime)));
-    info_lines.push(format!("Shell: {}", info.shell));
-    info_lines.push(format!("Resolution: {}", info.resolution));
-    info_lines.push(format!("DE: {}", info.de));
-    info_lines.push(format!("WM: {}", info.wm));
-    info_lines.push(format!("Theme: {}", info.theme));
-    info_lines.push(format!("Icons: {}", info.icons));
-    info_lines.push(format!("Terminal: {}", info.terminal));
-    info_lines.push(format!("CPU: {}", info.cpu_info));
+    info_lines.push(format!("OS{}: {}", reset_sequence, info.os_name));
+    info_lines.push(format!("Kernel{}: {}", reset_sequence, info.kernel));
     info_lines.push(format!(
-        "Memory: {} / {}",
+        "Uptime{}: {}",
+        reset_sequence,
+        format_uptime(info.uptime)
+    ));
+    info_lines.push(format!("Shell{}: {}", reset_sequence, info.shell));
+    info_lines.push(format!("Resolution{}: {}", reset_sequence, info.resolution));
+    info_lines.push(format!("DE{}: {}", reset_sequence, info.de));
+    info_lines.push(format!("WM{}: {}", reset_sequence, info.wm));
+    info_lines.push(format!("Theme{}: {}", reset_sequence, info.theme));
+    info_lines.push(format!("Icons{}: {}", reset_sequence, info.icons));
+    info_lines.push(format!("Terminal{}: {}", reset_sequence, info.terminal));
+    info_lines.push(format!("CPU{}: {}", reset_sequence, info.cpu_info));
+    info_lines.push(format!(
+        "Memory{}: {} / {}",
+        reset_sequence,
         format_memory(info.memory_used),
         format_memory(info.memory_total)
     ));
@@ -68,7 +74,6 @@ fn main() {
 
     // Track color state
     let mut current_color = String::new();
-    let reset_sequence = "\x1b[0m";
 
     for i in 0..max_lines {
         let logo_line = if i < logo_lines.len() {
@@ -131,22 +136,55 @@ fn main() {
 
         // Print info with padding
         if !info_line.is_empty() {
-            // Reset color, add padding, print info
-            if !current_color.is_empty() {
-                print!(
-                    "{}{:padding$}{}",
-                    reset_sequence,
-                    "",
-                    info_line,
-                    padding = padding_needed
-                );
+            // Reset color, add padding
+            print!(
+                "{}{:padding$}",
+                reset_sequence,
+                "",
+                padding = padding_needed
+            );
 
-                // Only restore color if there's more logo lines coming
-                if i + 1 < logo_lines.len() {
-                    print!("{}", current_color);
+            // Special handling for user@hostname line (first line)
+            if i == 0 && !current_color.is_empty() {
+                // Split the user@hostname string
+                let parts: Vec<&str> = info_line.splitn(2, '@').collect();
+                if parts.len() == 2 {
+                    // Print username with color
+                    print!("{}{}", current_color, parts[0]);
+                    // Print @ with default color
+                    print!("{}@", reset_sequence);
+                    // Print hostname with color
+                    print!("{}{}", current_color, parts[1]);
+                    // Reset color at the end
+                    print!("{}", reset_sequence);
+                } else {
+                    // Fallback if splitting didn't work as expected
+                    print!("{}", info_line);
                 }
+            }
+            // Handle divider line (second line)
+            else if i == 1 {
+                print!("{}", info_line);
+            }
+            // Handle all other info lines
+            else if !current_color.is_empty() {
+                // Insert color before the label and keep the reset before the colon
+                let colored_line = if info_line.contains(reset_sequence) {
+                    let parts: Vec<&str> = info_line.splitn(2, reset_sequence).collect();
+                    format!("{}{}{}", current_color, parts[0], reset_sequence)
+                        + if parts.len() > 1 { parts[1] } else { "" }
+                } else {
+                    info_line.to_string()
+                };
+
+                print!("{}", colored_line);
             } else {
-                print!("{:padding$}{}", "", info_line, padding = padding_needed);
+                print!("{}", info_line);
+            }
+
+            // Only restore color if there's more logo lines coming
+            if i + 1 < logo_lines.len() && !current_color.is_empty() {
+                print!("{}", current_color);
             }
         }
 

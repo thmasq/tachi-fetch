@@ -107,11 +107,11 @@ fn process_logos(logos: &[Logo]) -> Vec<ProcessedLogo> {
                 if i < logo.colors.len() && logo.colors[i] > 0 {
                     let color_value = logo.colors[i];
                     let ansi_code = if color_value <= 7 {
-                        // Basic colors (30-37)
-                        format!("\x1b[{}m", 30 + color_value)
+                        // Basic colors (30-37) with bold
+                        format!("\x1b[1;{}m", 30 + color_value)
                     } else {
-                        // Extended 256-color mode
-                        format!("\x1b[38;5;{}m", color_value)
+                        // Extended 256-color mode with bold
+                        format!("\x1b[1;38;5;{}m", color_value)
                     };
                     color_map.insert(format!("${{c{}}}", i + 1), ansi_code);
                 }
